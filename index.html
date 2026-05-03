@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Professional Board | akashProg</title>
+    <!-- Google Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
+    <!-- Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.socket.io/4.6.1/socket.io.min.js"></script>
+    
+    <style>
+        body {
+            font-family: 'Outfit', sans-serif;
+            background-color: #0b0e14;
+            color: white;
+            margin: 0;
+            overflow: hidden;
+        }
+        .canvas-bg {
+            background-image: radial-gradient(#2d3748 0.5px, transparent 0.5px);
+            background-size: 20px 20px;
+            background-color: #121720;
+        }
+        .glass-panel {
+            background: rgba(23, 25, 35, 0.8);
+            backdrop-filter: blur(20px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        .tool-btn {
+            transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        .tool-btn:hover { background: rgba(99, 102, 241, 0.2); transform: translateY(-2px); }
+        .active-tool { background: #6366f1 !important; color: white !important; box-shadow: 0 0 15px rgba(99, 102, 241, 0.5); }
+        
+        .akash-badge {
+            background: linear-gradient(135deg, #6366f1 0%, #a855f7 100%);
+            box-shadow: 0 4px 15px rgba(99, 102, 241, 0.4);
+            animation: pulse 2s infinite;
+        }
+        @keyframes pulse {
+            0% { transform: scale(1); }
+            50% { transform: scale(1.05); }
+            100% { transform: scale(1); }
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+
+        function App() {
+            const [joined, setJoined] = useState(false);
+            const [roomId, setRoomId] = useState('');
+            const [username, setUsername] = useState('');
+            const [color, setColor] = useState('#6366f1');
+            const [size, setSize] = useState(5);
+            const [tool, setTool] = useState('pencil'); // pencil, eraser
+            const [users, setUsers] = useState([]);
+            
+            const canvasRef = useRef(null);
+            const socketRef = useRef(null);
+            const isDrawing = useRef(false);
+            const lastPos = useRef({ x: 0, y: 0 });
+            const history = useRef([]);
+
+            useEffect(() => {
+                if (joined) {
+                    socketRef.current = io();
+                    socketRef.current.emit('join-room', { roomId, username });
+                    socketRef.current.on('user-list', (list) => setUsers(list));
+                    socketRef.current.on('draw-data', (data) => {
+                        const ctx = canvasRef.current.getContext('2d');
+                        drawOnCanvas(ctx, data.prevX, data.prevY, data.x, data.y, data.color, data.size, data.mode);
+                    });
+                    socketRef.current.on('clear-canvas', () => {
+                        const ctx = canvasRef.current.getContext('2d');
+                        ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
+                    });
+                }
+            }, [joined]);
+
+            const drawOnCanvas = (ctx, prevX, prevY, x, y, col, sz, mode) => {
+                ctx.beginPath();
+                ctx.globalCompositeOperation = mode === 'eraser' ? 'destination-out' : 'source-over';
+                ctx.strokeStyle = col;
+                ctx.lineWidth = sz;
+                ctx.lineCap = 'round';
+                ctx.lineJoin = 'round';
+                ctx.moveTo(prevX, prevY);
+                ctx.lineTo(x, y);
+                ctx.stroke();
+                ctx.closePath();
+            };
+
+            const startDrawing = (e) => {
+                isDrawing.current = true;
+                const rect = canvasRef.current.getBoundingClientRect();
+                lastPos.current = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+                // Save history for undo
+                history.current.push(canvasRef.current.toDataURL());
+            };
+
+            const draw = (e) => {
+                if (!isDrawing.current) return;
+                const ctx = canvasRef.current.getContext('2d');
+                const rect = canvasRef.current.getBoundingClientRect();
+                const x = e.clientX - rect.left;
+                const y = e.clientY - rect.top;
+
+                drawOnCanvas(ctx, lastPos.current.x, lastPos.current.y, x, y, color, size, tool);
+                socketRef.current.emit('draw', { 
+                    roomId, prevX: lastPos.current.x, prevY: lastPos.current.y, x, y, color, size, mode: tool 
+                });
+                lastPos.current = { x, y };
+            };
+
+            const stopDrawing = () => isDrawing.current = false;
+
+            const clearCanvas = () => {
+                const ctx = canvasRef.current.getContext('2d');
+                ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
+                socketRef.current.emit('clear', roomId);
+            };
+
+            const downloadImage = () => {
+                const link = document.createElement('a');
+                link.download = `akashProg-board-${roomId}.png`;
+                link.href = canvasRef.current.toDataURL();
+                link.click();
+            };
+
+            const undo = () => {
+                if (history.current.length > 0) {
+                    const canvas = canvasRef.current;
+                    const ctx = canvas.getContext('2d');
+                    const img = new Image();
+                    img.src = history.current.pop();
+                    img.onload = () => {
+                        ctx.clearRect(0, 0, canvas.width, canvas.height);
+                        ctx.drawImage(img, 0, 0);
+                    };
+                }
+            };
+
+            if (!joined) {
+                return (
+                    <div className="flex flex-col h-screen items-center justify-center p-4 bg-[#0b0e14]">
+                        <div className="glass-panel p-12 rounded-[40px] shadow-2xl w-full max-w-lg border border-indigo-500/20 text-center">
+                            <div className="akash-badge inline-block px-6 py-2 rounded-full text-xs font-black uppercase tracking-[0.2em] mb-6">
+                                Created by AkashProg
+                            </div>
+                            <h2 className="text-5xl font-extrabold mb-4 tracking-tighter">Collaborative<br/><span className="text-indigo-500 text-6xl">Studio.</span></h2>
+                            <p className="text-gray-400 mb-10 font-light">Draw together with anyone, anywhere, instantly.</p>
+                            
+                            <div className="space-y-4">
+                                <input className="w-full bg-white/5 border border-white/10 p-5 rounded-2xl focus:outline-none focus:border-indigo-500 transition-all text-xl" placeholder="Your Username" onChange={e => setUsername(e.target.value)} />
+                                <input className="w-full bg-white/5 border border-white/10 p-5 rounded-2xl focus:outline-none focus:border-indigo-500 transition-all text-xl" placeholder="Room ID" onChange={e => setRoomId(e.target.value)} />
+                                <button 
+                                    onClick={() => username && roomId && setJoined(true)} 
+                                    className="w-full bg-indigo-600 hover:bg-indigo-500 py-5 rounded-2xl font-bold text-xl shadow-2xl shadow-indigo-500/40 transition-all transform hover:scale-[1.02] active:scale-95 mt-6"
+                                >
+                                    Get Started
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                );
+            }
+
+            return (
+                <div className="flex h-screen w-screen canvas-bg overflow-hidden">
+                    
+                    {/* Header Badge */}
+                    <div className="absolute top-6 left-1/2 transform -translate-x-1/2 z-50">
+                         <div className="akash-badge px-8 py-3 rounded-2xl text-sm font-bold uppercase tracking-widest flex items-center gap-3">
+                             <div className="w-2 h-2 bg-white rounded-full animate-ping"></div>
+                             Created by AkashProg
+                         </div>
+                    </div>
+
+                    {/* Sidebar Tools */}
+                    <div className="flex flex-col gap-4 m-6 p-4 glass-panel rounded-3xl z-50">
+                        <div className="mb-4 text-center font-black text-indigo-500 text-xl border-b border-white/10 pb-4">A.</div>
+                        <button onClick={() => setTool('pencil')} className={`tool-btn p-4 rounded-2xl ${tool === 'pencil' ? 'active-tool' : ''}`} title="Pencil">✎</button>
+                        <button onClick={() => setTool('eraser')} className={`tool-btn p-4 rounded-2xl ${tool === 'eraser' ? 'active-tool' : ''}`} title="Eraser">⎋</button>
+                        <input type="color" value={color} onChange={e => setColor(e.target.value)} className="w-12 h-12 rounded-xl cursor-pointer bg-transparent border-none" />
+                        <div className="h-[1px] bg-white/10 my-2"></div>
+                        <button onClick={undo} className="tool-btn p-4 rounded-2xl text-xl" title="Undo">↶</button>
+                        <button onClick={clearCanvas} className="tool-btn p-4 rounded-2xl text-xl text-red-400" title="Clear">🗑</button>
+                        <button onClick={downloadImage} className="tool-btn p-4 rounded-2xl text-xl text-green-400" title="Download">⬇</button>
+                    </div>
+
+                    {/* Main Workspace */}
+                    <div className="flex-1 relative flex items-center justify-center pr-10 py-10">
+                        
+                        {/* Users Indicator */}
+                        <div className="absolute top-6 right-10 glass-panel px-6 py-3 rounded-2xl flex items-center gap-4 border border-white/10">
+                            <div className="flex -space-x-3">
+                                {users.slice(0,3).map((u, i) => (
+                                    <div key={i} className="w-10 h-10 rounded-full border-2 border-[#0b0e14] bg-indigo-600 flex items-center justify-center text-xs font-bold ring-2 ring-indigo-500/30 uppercase">
+                                        {u.username.charAt(0)}
+                                    </div>
+                                ))}
+                            </div>
+                            <div className="flex flex-col">
+                                <span className="text-xs font-bold leading-none">{users.length} Active</span>
+                                <span className="text-[10px] text-indigo-400 uppercase tracking-tighter">Collaborating</span>
+                            </div>
+                        </div>
+
+                        {/* Brush Size Slider */}
+                        <div className="absolute bottom-10 left-1/2 transform -translate-x-1/2 glass-panel px-8 py-4 rounded-3xl flex items-center gap-6 border border-white/10">
+                             <span className="text-xs font-bold text-gray-400 uppercase tracking-widest">Brush Size</span>
+                             <input type="range" min="1" max="50" value={size} onChange={e => setSize(e.target.value)} className="w-48 accent-indigo-500 h-1 bg-white/10 rounded-lg appearance-none cursor-pointer" />
+                             <span className="text-xs font-bold bg-indigo-500/20 px-3 py-1 rounded-lg text-indigo-400">{size}px</span>
+                        </div>
+
+                        <canvas 
+                            ref={canvasRef}
+                            width={window.innerWidth * 0.85}
+                            height={window.innerHeight * 0.85}
+                            onMouseDown={startDrawing}
+                            onMouseMove={draw}
+                            onMouseUp={stopDrawing}
+                            onMouseOut={stopDrawing}
+                            className="bg-white rounded-[32px] shadow-[0_0_100px_rgba(0,0,0,0.6)] cursor-crosshair transition-all border-[12px] border-[#171923]"
+                        />
+                    </div>
+
+                    {/* Bottom Right Floating Badge */}
+                    <div className="absolute bottom-6 right-6 flex items-center gap-2 opacity-50 hover:opacity-100 transition-all cursor-default">
+                         <span className="text-[10px] font-bold tracking-[0.3em] uppercase">Built with Power by</span>
+                         <span className="bg-white text-black px-2 py-0.5 rounded font-black text-[10px]">akashProg</span>
+                    </div>
+
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
